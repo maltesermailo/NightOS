@@ -1,0 +1,150 @@
+/* Declare constants for the multiboot header. */
+.set ALIGN,    1<<0             /* align loaded modules on page boundaries */
+.set MEMINFO,  1<<1             /* provide memory map */
+.set FLAGS,    ALIGN | MEMINFO  /* this is the Multiboot 'flag' field */
+.set MAGIC,    0x1BADB002       /* 'magic number' lets bootloader find the header */
+.set CHECKSUM, -(MAGIC + FLAGS) /* checksum of above, to prove we are multiboot */
+
+.section .multiboot
+.align 4
+.long MAGIC
+.long FLAGS
+.long CHECKSUM
+
+
+.section .bss
+.align 16
+stack_bottom:
+.skip 16384 # 16 KiB
+stack_top:
+
+.section .text
+
+GDT64:
+	.Null:
+	.word 0xFFFF
+	.word 0
+	.byte 0
+	.byte 0
+	.byte 1
+	.byte 0
+	.Code:
+	.word 0
+	.word 0
+	.byte 0
+	.byte 10011010b
+	.byte 10101111b
+	.byte 0
+	.Data:
+	.word 0
+	.word 0
+	.byte 0
+	.byte 10010010b
+	.byte 00000000b
+	.byte 0
+	.Pointer:
+	.word $ - GDT64 - 1
+	.double GDT64
+
+.code32
+.global _start
+.type _start, @function
+_start:
+	/*Check for CPUID */
+	mov $stack_top, %esp
+
+	pushf
+	pop %eax
+
+	mov %eax, %ecx
+
+	xor %eax, 1 << 21
+
+	push %eax
+	popf
+
+	pushf
+	pop %eax
+
+	push %ecx
+	popf
+
+	xor %eax, %ecx
+	jz .NoCPUID
+
+	/*Check for Long Mode*/
+	mov 0x80000000, %eax
+    cpuid                  
+    cmp %eax, 0x80000001    
+    jb .NoLongMode  
+
+	mov 0x80000001, %eax
+    cpuid                 
+    test %edx, 1 << 29      
+    jz .NoLongMode  
+	
+	/*Setup PML4*/
+	mov 0x1000, %edi
+	mov %edi, %cr3
+	xor %eax, %eax
+	mov 4096, %ecx
+	rep stosl
+	mov %cr3, %edi
+
+	/*Create PDPT, PDP, PT */
+	movl 0x2003, %edi
+	add 0x1000, %edi
+	movl 0x3003, %edi
+	add 0x1000, %edi
+	movl 0x4003, %edi
+	add 0x1000, %edi
+
+	/* Identity map 2 MB */
+	mov 0x00000003, %ebx
+	mov 512, %ecx
+
+.SetEntry:
+	movl %ebx, %edi
+	add 0x1000, %ebx
+	add 8, %edi
+	loop .SetEntry
+
+	/*Enable paging */
+	mov %cr4, %eax
+	or %eax, 1 << 5
+	mov %eax, %cr4
+
+	mov 0xC0000080, %ecx
+	rdmsr
+	or %eax, 1 << 8
+	wrmsr
+
+	mov %cr0, %eax
+	or %eax, 1 << 31
+	mov %eax, %cr0
+
+	call kernel_main
+
+	cli
+1:	hlt
+	jmp 1b
+ 
+
+.NoCPUID:
+	cli
+2:  hlt
+	jmp 2b
+
+.NoLongMode:
+	cli
+3:  hlt
+	jmp 3b
+
+.code64
+.LongMode:
+
+/*
+Set the size of the _start symbol to the current location '.' minus its start.
+This is useful when debugging or when you implement call tracing.
+*/
+.size _start, . - _start
